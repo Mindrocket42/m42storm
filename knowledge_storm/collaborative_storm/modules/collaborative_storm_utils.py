@@ -9,7 +9,7 @@ if TYPE_CHECKING:
     from ..engine import RunnerArgument
 from ...interface import Information, Retriever, LMConfigs
 from ...logging_wrapper import LoggingWrapper
-from ...rm import BingSearch
+from ...rm import GPT4oMiniSearchRM
 
 
 def extract_storm_info_snippet(info: Information, snippet_index: int) -> Information:
@@ -250,7 +250,7 @@ def _get_answer_question_module_instance(
 
     # configure retriever
     if rm is None:
-        rm = BingSearch(k=runner_argument.retrieve_top_k)
+        rm = GPT4oMiniSearchRM(k=runner_argument.retrieve_top_k)
     retriever = Retriever(rm=rm, max_thread=runner_argument.max_search_thread)
     # return AnswerQuestionModule instance
     return AnswerQuestionModule(

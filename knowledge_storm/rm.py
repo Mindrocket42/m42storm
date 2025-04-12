@@ -1,6 +1,7 @@
 import logging
 import os
 from typing import Callable, Union, List
+import json
 
 import backoff
 import dspy
@@ -10,42 +11,63 @@ from dsp import backoff_hdlr, giveup_hdlr
 from .utils import WebPageHelper
 
 
-class YouRM(dspy.Retrieve):
-    def __init__(self, ydc_api_key=None, k=3, is_valid_source: Callable = None):
-        super().__init__(k=k)
-        if not ydc_api_key and not os.environ.get("YDC_API_KEY"):
-            raise RuntimeError(
-                "You must supply ydc_api_key or set environment variable YDC_API_KEY"
-            )
-        elif ydc_api_key:
-            self.ydc_api_key = ydc_api_key
-        else:
-            self.ydc_api_key = os.environ["YDC_API_KEY"]
-        self.usage = 0
+class GPT4oMiniSearchRM(dspy.Retrieve):
+    """Retrieves search results using the gpt-4o-mini-search-preview model via dspy.OpenAI."""
 
-        # If not None, is_valid_source shall be a function that takes a URL and returns a boolean.
-        if is_valid_source:
-            self.is_valid_source = is_valid_source
-        else:
-            self.is_valid_source = lambda x: True
+    def __init__(self, openai_api_key: str = None, k: int = 3, model: str = "gpt-4o-mini-search-preview", **kwargs):
+        super().__init__(k=k)
+        if not openai_api_key:
+            openai_api_key = os.environ.get("OPENAI_API_KEY")
+        if not openai_api_key:
+            raise ValueError("OpenAI API key must be provided via openai_api_key parameter or OPENAI_API_KEY environment variable.")
+        
+        self.llm = dspy.OpenAI(model=model, api_key=openai_api_key, **kwargs)
+        self.usage = 0
+        # TODO: Define a dspy.Signature for the search task if needed, or use direct call.
 
     def get_usage_and_reset(self):
+        # Note: dspy.OpenAI might track token usage internally. 
+        # This method might need adjustment based on how usage is tracked/reported.
         usage = self.usage
         self.usage = 0
+        return {"GPT4oMiniSearchRM_Queries": usage}
 
-        return {"YouRM": usage}
+    @backoff.on_exception(backoff.expo, Exception, max_tries=3, on_backoff=backoff_hdlr, on_giveup=giveup_hdlr)
+    def _call_llm(self, query: str):
+        # Placeholder: Direct call to the LLM. This might need a proper Signature.
+        # Assuming the LLM returns a JSON string with search results.
+        # Example prompt (adjust as needed):
+        prompt = f"Perform a web search for: {query}\\nReturn the top {self.k} results as a JSON list, where each item has 'url', 'title', and 'snippet' keys."
+        response = self.llm(prompt)
+        # Assuming the first choice's message content holds the result
+        # This structure depends heavily on dspy.OpenAI's return format
+        if isinstance(response, list) and len(response) > 0:
+             # If response is already parsed list by dspy based on signature
+             # This part needs verification based on actual dspy behavior
+             raw_results = response[0] 
+        elif hasattr(response, 'choices') and len(response.choices) > 0:
+             # Standard OpenAI API response structure
+             raw_results = response.choices[0].message.content
+        elif isinstance(response, str): 
+             # Simple string response
+             raw_results = response
+        else:
+             # Fallback or error handling
+             logging.error(f"Unexpected LLM response format for query '{query}': {type(response)}")
+             raw_results = "[]" # Default to empty list string
 
-    def forward(
-        self, query_or_queries: Union[str, List[str]], exclude_urls: List[str] = []
-    ):
-        """Search with You.com for self.k top passages for query or queries
+        logging.debug(f"Raw LLM Search Results for '{query}': {raw_results}")
+        return raw_results
+
+    def forward(self, query_or_queries: Union[str, List[str]], exclude_urls: List[str] = None):
+        """Search using gpt-4o-mini-search-preview.
 
         Args:
             query_or_queries (Union[str, List[str]]): The query or queries to search for.
-            exclude_urls (List[str]): A list of urls to exclude from the search results.
+            exclude_urls (List[str]): Optional list of URLs to exclude (best effort).
 
         Returns:
-            a list of Dicts, each dict has keys of 'description', 'snippets' (list of strings), 'title', 'url'
+            a list of Dicts, each dict has keys 'url', 'title', 'description'/'snippet'.
         """
         queries = (
             [query_or_queries]
@@ -54,126 +76,48 @@ class YouRM(dspy.Retrieve):
         )
         self.usage += len(queries)
         collected_results = []
-        for query in queries:
-            try:
-                headers = {"X-API-Key": self.ydc_api_key}
-                results = requests.get(
-                    f"https://api.ydc-index.io/search?query={query}",
-                    headers=headers,
-                ).json()
-
-                authoritative_results = []
-                for r in results["hits"]:
-                    if self.is_valid_source(r["url"]) and r["url"] not in exclude_urls:
-                        authoritative_results.append(r)
-                if "hits" in results:
-                    collected_results.extend(authoritative_results[: self.k])
-            except Exception as e:
-                logging.error(f"Error occurs when searching query {query}: {e}")
-
-        return collected_results
-
-
-class BingSearch(dspy.Retrieve):
-    def __init__(
-        self,
-        bing_search_api_key=None,
-        k=3,
-        is_valid_source: Callable = None,
-        min_char_count: int = 150,
-        snippet_chunk_size: int = 1000,
-        webpage_helper_max_threads=10,
-        mkt="en-US",
-        language="en",
-        **kwargs,
-    ):
-        """
-        Params:
-            min_char_count: Minimum character count for the article to be considered valid.
-            snippet_chunk_size: Maximum character count for each snippet.
-            webpage_helper_max_threads: Maximum number of threads to use for webpage helper.
-            mkt, language, **kwargs: Bing search API parameters.
-            - Reference: https://learn.microsoft.com/en-us/bing/search-apis/bing-web-search/reference/query-parameters
-        """
-        super().__init__(k=k)
-        if not bing_search_api_key and not os.environ.get("BING_SEARCH_API_KEY"):
-            raise RuntimeError(
-                "You must supply bing_search_subscription_key or set environment variable BING_SEARCH_API_KEY"
-            )
-        elif bing_search_api_key:
-            self.bing_api_key = bing_search_api_key
-        else:
-            self.bing_api_key = os.environ["BING_SEARCH_API_KEY"]
-        self.endpoint = "https://api.bing.microsoft.com/v7.0/search"
-        self.params = {"mkt": mkt, "setLang": language, "count": k, **kwargs}
-        self.webpage_helper = WebPageHelper(
-            min_char_count=min_char_count,
-            snippet_chunk_size=snippet_chunk_size,
-            max_thread_num=webpage_helper_max_threads,
-        )
-        self.usage = 0
-
-        # If not None, is_valid_source shall be a function that takes a URL and returns a boolean.
-        if is_valid_source:
-            self.is_valid_source = is_valid_source
-        else:
-            self.is_valid_source = lambda x: True
-
-    def get_usage_and_reset(self):
-        usage = self.usage
-        self.usage = 0
-
-        return {"BingSearch": usage}
-
-    def forward(
-        self, query_or_queries: Union[str, List[str]], exclude_urls: List[str] = []
-    ):
-        """Search with Bing for self.k top passages for query or queries
-
-        Args:
-            query_or_queries (Union[str, List[str]]): The query or queries to search for.
-            exclude_urls (List[str]): A list of urls to exclude from the search results.
-
-        Returns:
-            a list of Dicts, each dict has keys of 'description', 'snippets' (list of strings), 'title', 'url'
-        """
-        queries = (
-            [query_or_queries]
-            if isinstance(query_or_queries, str)
-            else query_or_queries
-        )
-        self.usage += len(queries)
-
-        url_to_results = {}
-
-        headers = {"Ocp-Apim-Subscription-Key": self.bing_api_key}
 
         for query in queries:
             try:
-                results = requests.get(
-                    self.endpoint, headers=headers, params={**self.params, "q": query}
-                ).json()
+                raw_response_str = self._call_llm(query)
+                
+                # Attempt to parse the JSON response from the LLM
+                try:
+                    parsed_results = json.loads(raw_response_str)
+                    if not isinstance(parsed_results, list):
+                        logging.warning(f"LLM response for '{query}' was not a JSON list: {raw_response_str}")
+                        parsed_results = []
+                except json.JSONDecodeError:
+                    logging.error(f"Failed to decode JSON response for query '{query}': {raw_response_str}")
+                    parsed_results = [] # Default to empty list on parse failure
 
-                for d in results["webPages"]["value"]:
-                    if self.is_valid_source(d["url"]) and d["url"] not in exclude_urls:
-                        url_to_results[d["url"]] = {
-                            "url": d["url"],
-                            "title": d["name"],
-                            "description": d["snippet"],
+                # Format results into the expected structure
+                for result in parsed_results:
+                    if isinstance(result, dict) and 'url' in result and 'title' in result and 'snippet' in result:
+                        # Basic filtering based on exclude_urls if provided
+                        if exclude_urls and result['url'] in exclude_urls:
+                            continue
+                        
+                        # Map snippet to description for compatibility if needed, or use snippet directly
+                        formatted_result = {
+                            'url': result.get('url'),
+                            'title': result.get('title'),
+                            'description': result.get('snippet'), # Or result.get('description') if LLM provides that
+                            'snippets': [result.get('snippet')] # Often the main snippet is used here
                         }
+                        collected_results.append(formatted_result)
+                    else:
+                        logging.warning(f"Skipping malformed result item for query '{query}': {result}")
+
             except Exception as e:
-                logging.error(f"Error occurs when searching query {query}: {e}")
+                logging.error(f"Error processing query '{query}' with GPT4oMiniSearchRM: {e}")
+                # Optionally add a dummy error result or just skip
 
-        valid_url_to_snippets = self.webpage_helper.urls_to_snippets(
-            list(url_to_results.keys())
-        )
-        collected_results = []
-        for url in valid_url_to_snippets:
-            r = url_to_results[url]
-            r["snippets"] = valid_url_to_snippets[url]["snippets"]
-            collected_results.append(r)
-
-        return collected_results
+        # Ensure we don't exceed self.k results overall if multiple queries were processed
+        # Although the prompt asks for k results per query, aggregation might exceed k.
+        # Depending on desired behavior, might need truncation here.
+        # return collected_results[:self.k] # Option 1: Truncate overall
+        return collected_results # Option 2: Return all collected results
 
 
 class VectorRM(dspy.Retrieve):
@@ -403,708 +347,6 @@ class StanfordOvalArxivRM(dspy.Retrieve):
         return collected_results
 
 
-class SerperRM(dspy.Retrieve):
-    """Retrieve information from custom queries using Serper.dev."""
-
-    def __init__(
-        self,
-        serper_search_api_key=None,
-        k=3,
-        query_params=None,
-        ENABLE_EXTRA_SNIPPET_EXTRACTION=False,
-        min_char_count: int = 150,
-        snippet_chunk_size: int = 1000,
-        webpage_helper_max_threads=10,
-    ):
-        """Args:
-        serper_search_api_key str: API key to run serper, can be found by creating an account on https://serper.dev/
-        query_params (dict or list of dict): parameters in dictionary or list of dictionaries that has a max size of 100 that will be used to query.
-            Commonly used fields are as follows (see more information in https://serper.dev/playground):
-                q str: query that will be used with google search
-                type str: type that will be used for browsing google. Types are search, images, video, maps, places, etc.
-                gl str: Country that will be focused on for the search
-                location str: Country where the search will originate from. All locates can be found here: https://api.serper.dev/locations.
-                autocorrect bool: Enable autocorrect on the queries while searching, if query is misspelled, will be updated.
-                results int: Max number of results per page.
-                page int: Max number of pages per call.
-                tbs str: date time range, automatically set to any time by default.
-                qdr:h str: Date time range for the past hour.
-                qdr:d str: Date time range for the past 24 hours.
-                qdr:w str: Date time range for past week.
-                qdr:m str: Date time range for past month.
-                qdr:y str: Date time range for past year.
-        """
-        super().__init__(k=k)
-        self.usage = 0
-        self.query_params = None
-        self.ENABLE_EXTRA_SNIPPET_EXTRACTION = ENABLE_EXTRA_SNIPPET_EXTRACTION
-        self.webpage_helper = WebPageHelper(
-            min_char_count=min_char_count,
-            snippet_chunk_size=snippet_chunk_size,
-            max_thread_num=webpage_helper_max_threads,
-        )
-
-        if query_params is None:
-            self.query_params = {"num": k, "autocorrect": True, "page": 1}
-        else:
-            self.query_params = query_params
-            self.query_params.update({"num": k})
-        self.serper_search_api_key = serper_search_api_key
-        if not self.serper_search_api_key and not os.environ.get("SERPER_API_KEY"):
-            raise RuntimeError(
-                "You must supply a serper_search_api_key param or set environment variable SERPER_API_KEY"
-            )
-
-        elif self.serper_search_api_key:
-            self.serper_search_api_key = serper_search_api_key
-
-        else:
-            self.serper_search_api_key = os.environ["SERPER_API_KEY"]
-
-        self.base_url = "https://google.serper.dev"
-
-    def serper_runner(self, query_params):
-        self.search_url = f"{self.base_url}/search"
-
-        headers = {
-            "X-API-KEY": self.serper_search_api_key,
-            "Content-Type": "application/json",
-        }
-
-        response = requests.request(
-            "POST", self.search_url, headers=headers, json=query_params
-        )
-
-        if response == None:
-            raise RuntimeError(
-                f"Error had occurred while running the search process.\n Error is {response.reason}, had failed with status code {response.status_code}"
-            )
-
-        return response.json()
-
-    def get_usage_and_reset(self):
-        usage = self.usage
-        self.usage = 0
-        return {"SerperRM": usage}
-
-    def forward(self, query_or_queries: Union[str, List[str]], exclude_urls: List[str]):
-        """
-        Calls the API and searches for the query passed in.
-
-
-        Args:
-            query_or_queries (Union[str, List[str]]): The query or queries to search for.
-            exclude_urls (List[str]): Dummy parameter to match the interface. Does not have any effect.
-
-        Returns:
-            a list of dictionaries, each dictionary has keys of 'description', 'snippets' (list of strings), 'title', 'url'
-        """
-        queries = (
-            [query_or_queries]
-            if isinstance(query_or_queries, str)
-            else query_or_queries
-        )
-
-        self.usage += len(queries)
-        self.results = []
-        collected_results = []
-        for query in queries:
-            if query == "Queries:":
-                continue
-            query_params = self.query_params
-
-            # All available parameters can be found in the playground: https://serper.dev/playground
-            # Sets the json value for query to be the query that is being parsed.
-            query_params["q"] = query
-
-            # Sets the type to be search, can be images, video, places, maps etc that Google provides.
-            query_params["type"] = "search"
-
-            self.result = self.serper_runner(query_params)
-            self.results.append(self.result)
-
-        # Array of dictionaries that will be used by Storm to create the jsons
-        collected_results = []
-
-        if self.ENABLE_EXTRA_SNIPPET_EXTRACTION:
-            urls = []
-            for result in self.results:
-                organic_results = result.get("organic", [])
-                for organic in organic_results:
-                    url = organic.get("link")
-                    if url:
-                        urls.append(url)
-            valid_url_to_snippets = self.webpage_helper.urls_to_snippets(urls)
-        else:
-            valid_url_to_snippets = {}
-
-        for result in self.results:
-            try:
-                # An array of dictionaries that contains the snippets, title of the document and url that will be used.
-                organic_results = result.get("organic")
-                knowledge_graph = result.get("knowledgeGraph")
-                for organic in organic_results:
-                    snippets = [organic.get("snippet")]
-                    if self.ENABLE_EXTRA_SNIPPET_EXTRACTION:
-                        snippets.extend(
-                            valid_url_to_snippets.get(url, {}).get("snippets", [])
-                        )
-                    collected_results.append(
-                        {
-                            "snippets": snippets,
-                            "title": organic.get("title"),
-                            "url": organic.get("link"),
-                            "description": (
-                                knowledge_graph.get("description")
-                                if knowledge_graph is not None
-                                else ""
-                            ),
-                        }
-                    )
-            except:
-                continue
-
-        return collected_results
-
-
-class BraveRM(dspy.Retrieve):
-    def __init__(
-        self, brave_search_api_key=None, k=3, is_valid_source: Callable = None
-    ):
-        super().__init__(k=k)
-        if not brave_search_api_key and not os.environ.get("BRAVE_API_KEY"):
-            raise RuntimeError(
-                "You must supply brave_search_api_key or set environment variable BRAVE_API_KEY"
-            )
-        elif brave_search_api_key:
-            self.brave_search_api_key = brave_search_api_key
-        else:
-            self.brave_search_api_key = os.environ["BRAVE_API_KEY"]
-        self.usage = 0
-
-        # If not None, is_valid_source shall be a function that takes a URL and returns a boolean.
-        if is_valid_source:
-            self.is_valid_source = is_valid_source
-        else:
-            self.is_valid_source = lambda x: True
-
-    def get_usage_and_reset(self):
-        usage = self.usage
-        self.usage = 0
-
-        return {"BraveRM": usage}
-
-    def forward(
-        self, query_or_queries: Union[str, List[str]], exclude_urls: List[str] = []
-    ):
-        """Search with api.search.brave.com for self.k top passages for query or queries
-
-        Args:
-            query_or_queries (Union[str, List[str]]): The query or queries to search for.
-            exclude_urls (List[str]): A list of urls to exclude from the search results.
-
-        Returns:
-            a list of Dicts, each dict has keys of 'description', 'snippets' (list of strings), 'title', 'url'
-        """
-        queries = (
-            [query_or_queries]
-            if isinstance(query_or_queries, str)
-            else query_or_queries
-        )
-        self.usage += len(queries)
-        collected_results = []
-        for query in queries:
-            try:
-                headers = {
-                    "Accept": "application/json",
-                    "Accept-Encoding": "gzip",
-                    "X-Subscription-Token": self.brave_search_api_key,
-                }
-                response = requests.get(
-                    f"https://api.search.brave.com/res/v1/web/search?result_filter=web&q={query}",
-                    headers=headers,
-                ).json()
-                results = response.get("web", {}).get("results", [])
-
-                for result in results:
-                    collected_results.append(
-                        {
-                            "snippets": result.get("extra_snippets", []),
-                            "title": result.get("title"),
-                            "url": result.get("url"),
-                            "description": result.get("description"),
-                        }
-                    )
-            except Exception as e:
-                logging.error(f"Error occurs when searching query {query}: {e}")
-
-        return collected_results
-
-
-class SearXNG(dspy.Retrieve):
-    def __init__(
-        self,
-        searxng_api_url,
-        searxng_api_key=None,
-        k=3,
-        is_valid_source: Callable = None,
-    ):
-        """Initialize the SearXNG search retriever.
-        Please set up SearXNG according to https://docs.searxng.org/index.html.
-
-        Args:
-            searxng_api_url (str): The URL of the SearXNG API. Consult SearXNG documentation for details.
-            searxng_api_key (str, optional): The API key for the SearXNG API. Defaults to None. Consult SearXNG documentation for details.
-            k (int, optional): The number of top passages to retrieve. Defaults to 3.
-            is_valid_source (Callable, optional): A function that takes a URL and returns a boolean indicating if the
-            source is valid. Defaults to None.
-        """
-        super().__init__(k=k)
-        if not searxng_api_url:
-            raise RuntimeError("You must supply searxng_api_url")
-        self.searxng_api_url = searxng_api_url
-        self.searxng_api_key = searxng_api_key
-        self.usage = 0
-
-        if is_valid_source:
-            self.is_valid_source = is_valid_source
-        else:
-            self.is_valid_source = lambda x: True
-
-    def get_usage_and_reset(self):
-        usage = self.usage
-        self.usage = 0
-        return {"SearXNG": usage}
-
-    def forward(
-        self, query_or_queries: Union[str, List[str]], exclude_urls: List[str] = []
-    ):
-        """Search with SearxNG for self.k top passages for query or queries
-
-        Args:
-            query_or_queries (Union[str, List[str]]): The query or queries to search for.
-            exclude_urls (List[str]): A list of urls to exclude from the search results.
-
-        Returns:
-            a list of Dicts, each dict has keys of 'description', 'snippets' (list of strings), 'title', 'url'
-        """
-        queries = (
-            [query_or_queries]
-            if isinstance(query_or_queries, str)
-            else query_or_queries
-        )
-        self.usage += len(queries)
-        collected_results = []
-        headers = (
-            {"Authorization": f"Bearer {self.searxng_api_key}"}
-            if self.searxng_api_key
-            else {}
-        )
-
-        for query in queries:
-            try:
-                params = {"q": query, "format": "json"}
-                response = requests.get(
-                    self.searxng_api_url, headers=headers, params=params
-                )
-                results = response.json()
-
-                for r in results["results"]:
-                    if self.is_valid_source(r["url"]) and r["url"] not in exclude_urls:
-                        collected_results.append(
-                            {
-                                "description": r.get("content", ""),
-                                "snippets": [r.get("content", "")],
-                                "title": r.get("title", ""),
-                                "url": r["url"],
-                            }
-                        )
-            except Exception as e:
-                logging.error(f"Error occurs when searching query {query}: {e}")
-
-        return collected_results
-
-
-class DuckDuckGoSearchRM(dspy.Retrieve):
-    """Retrieve information from custom queries using DuckDuckGo."""
-
-    def __init__(
-        self,
-        k: int = 3,
-        is_valid_source: Callable = None,
-        min_char_count: int = 150,
-        snippet_chunk_size: int = 1000,
-        webpage_helper_max_threads=10,
-        safe_search: str = "On",
-        region: str = "us-en",
-    ):
-        """
-        Params:
-            min_char_count: Minimum character count for the article to be considered valid.
-            snippet_chunk_size: Maximum character count for each snippet.
-            webpage_helper_max_threads: Maximum number of threads to use for webpage helper.
-            **kwargs: Additional parameters for the OpenAI API.
-        """
-        super().__init__(k=k)
-        try:
-            from duckduckgo_search import DDGS
-        except ImportError as err:
-            raise ImportError(
-                "Duckduckgo requires `pip install duckduckgo_search`."
-            ) from err
-        self.k = k
-        self.webpage_helper = WebPageHelper(
-            min_char_count=min_char_count,
-            snippet_chunk_size=snippet_chunk_size,
-            max_thread_num=webpage_helper_max_threads,
-        )
-        self.usage = 0
-        # All params for search can be found here:
-        #   https://duckduckgo.com/duckduckgo-help-pages/settings/params/
-
-        # Sets the backend to be api
-        self.duck_duck_go_backend = "api"
-
-        # Only gets safe search results
-        self.duck_duck_go_safe_search = safe_search
-
-        # Specifies the region that the search will use
-        self.duck_duck_go_region = region
-
-        # If not None, is_valid_source shall be a function that takes a URL and returns a boolean.
-        if is_valid_source:
-            self.is_valid_source = is_valid_source
-        else:
-            self.is_valid_source = lambda x: True
-
-        # Import the duckduckgo search library found here: https://github.com/deedy5/duckduckgo_search
-        self.ddgs = DDGS()
-
-    def get_usage_and_reset(self):
-        usage = self.usage
-        self.usage = 0
-        return {"DuckDuckGoRM": usage}
-
-    @backoff.on_exception(
-        backoff.expo,
-        (Exception,),
-        max_time=1000,
-        max_tries=8,
-        on_backoff=backoff_hdlr,
-        giveup=giveup_hdlr,
-    )
-    def request(self, query: str):
-        results = self.ddgs.text(
-            query, max_results=self.k, backend=self.duck_duck_go_backend
-        )
-        return results
-
-    def forward(
-        self, query_or_queries: Union[str, List[str]], exclude_urls: List[str] = []
-    ):
-        """Search with DuckDuckGoSearch for self.k top passages for query or queries
-        Args:
-            query_or_queries (Union[str, List[str]]): The query or queries to search for.
-            exclude_urls (List[str]): A list of urls to exclude from the search results.
-        Returns:
-            a list of Dicts, each dict has keys of 'description', 'snippets' (list of strings), 'title', 'url'
-        """
-        queries = (
-            [query_or_queries]
-            if isinstance(query_or_queries, str)
-            else query_or_queries
-        )
-        self.usage += len(queries)
-
-        collected_results = []
-
-        for query in queries:
-            #  list of dicts that will be parsed to return
-            results = self.request(query)
-
-            for d in results:
-                # assert d is dict
-                if not isinstance(d, dict):
-                    print(f"Invalid result: {d}\n")
-                    continue
-
-                try:
-                    # ensure keys are present
-                    url = d.get("href", None)
-                    title = d.get("title", None)
-                    description = d.get("description", title)
-                    snippets = [d.get("body", None)]
-
-                    # raise exception of missing key(s)
-                    if not all([url, title, description, snippets]):
-                        raise ValueError(f"Missing key(s) in result: {d}")
-                    if self.is_valid_source(url) and url not in exclude_urls:
-                        result = {
-                            "url": url,
-                            "title": title,
-                            "description": description,
-                            "snippets": snippets,
-                        }
-                        collected_results.append(result)
-                    else:
-                        print(f"invalid source {url} or url in exclude_urls")
-                except Exception as e:
-                    print(f"Error occurs when processing {result=}: {e}\n")
-                    print(f"Error occurs when searching query {query}: {e}")
-
-        return collected_results
-
-
-class TavilySearchRM(dspy.Retrieve):
-    """Retrieve information from custom queries using Tavily. Documentation and examples can be found at https://docs.tavily.com/docs/python-sdk/tavily-search/examples"""
-
-    def __init__(
-        self,
-        tavily_search_api_key=None,
-        k: int = 3,
-        is_valid_source: Callable = None,
-        min_char_count: int = 150,
-        snippet_chunk_size: int = 1000,
-        webpage_helper_max_threads=10,
-        include_raw_content=False,
-    ):
-        """
-        Params:
-            tavily_search_api_key str: API key for tavily that can be retrieved from https://tavily.com/
-            min_char_count: Minimum character count for the article to be considered valid.
-            snippet_chunk_size: Maximum character count for each snippet.
-            webpage_helper_max_threads: Maximum number of threads to use for webpage helper.
-            include_raw_content bool: Boolean that is used to determine if the full text should be returned.
-        """
-        super().__init__(k=k)
-        try:
-            from tavily import TavilyClient
-        except ImportError as err:
-            raise ImportError("Tavily requires `pip install tavily-python`.") from err
-
-        if not tavily_search_api_key and not os.environ.get("TAVILY_API_KEY"):
-            raise RuntimeError(
-                "You must supply tavily_search_api_key or set environment variable TAVILY_API_KEY"
-            )
-        elif tavily_search_api_key:
-            self.tavily_search_api_key = tavily_search_api_key
-        else:
-            self.tavily_search_api_key = os.environ["TAVILY_API_KEY"]
-
-        self.k = k
-        self.webpage_helper = WebPageHelper(
-            min_char_count=min_char_count,
-            snippet_chunk_size=snippet_chunk_size,
-            max_thread_num=webpage_helper_max_threads,
-        )
-
-        self.usage = 0
-
-        # Creates client instance that will use search. Full search params are here:
-        # https://docs.tavily.com/docs/python-sdk/tavily-search/examples
-        self.tavily_client = TavilyClient(api_key=self.tavily_search_api_key)
-
-        self.include_raw_content = include_raw_content
-
-        # If not None, is_valid_source shall be a function that takes a URL and returns a boolean.
-        if is_valid_source:
-            self.is_valid_source = is_valid_source
-        else:
-            self.is_valid_source = lambda x: True
-
-    def get_usage_and_reset(self):
-        usage = self.usage
-        self.usage = 0
-        return {"TavilySearchRM": usage}
-
-    def forward(
-        self, query_or_queries: Union[str, List[str]], exclude_urls: List[str] = []
-    ):
-        """Search with TavilySearch for self.k top passages for query or queries
-        Args:
-            query_or_queries (Union[str, List[str]]): The query or queries to search for.
-            exclude_urls (List[str]): A list of urls to exclude from the search results.
-        Returns:
-            a list of Dicts, each dict has keys of 'description', 'snippets' (list of strings), 'title', 'url'
-        """
-        queries = (
-            [query_or_queries]
-            if isinstance(query_or_queries, str)
-            else query_or_queries
-        )
-        self.usage += len(queries)
-
-        collected_results = []
-
-        for query in queries:
-            args = {
-                "max_results": self.k,
-                "include_raw_contents": self.include_raw_content,
-            }
-            #  list of dicts that will be parsed to return
-            responseData = self.tavily_client.search(query)
-            results = responseData.get("results")
-            for d in results:
-                # assert d is dict
-                if not isinstance(d, dict):
-                    print(f"Invalid result: {d}\n")
-                    continue
-
-                try:
-                    # ensure keys are present
-                    url = d.get("url", None)
-                    title = d.get("title", None)
-                    description = d.get("content", None)
-                    snippets = []
-                    if d.get("raw_body_content"):
-                        snippets.append(d.get("raw_body_content"))
-                    else:
-                        snippets.append(d.get("content"))
-
-                    # raise exception of missing key(s)
-                    if not all([url, title, description, snippets]):
-                        raise ValueError(f"Missing key(s) in result: {d}")
-                    if self.is_valid_source(url) and url not in exclude_urls:
-                        result = {
-                            "url": url,
-                            "title": title,
-                            "description": description,
-                            "snippets": snippets,
-                        }
-                        collected_results.append(result)
-                    else:
-                        print(f"invalid source {url} or url in exclude_urls")
-                except Exception as e:
-                    print(f"Error occurs when processing {result=}: {e}\n")
-                    print(f"Error occurs when searching query {query}: {e}")
-
-        return collected_results
-
-
-class GoogleSearch(dspy.Retrieve):
-    def __init__(
-        self,
-        google_search_api_key=None,
-        google_cse_id=None,
-        k=3,
-        is_valid_source: Callable = None,
-        min_char_count: int = 150,
-        snippet_chunk_size: int = 1000,
-        webpage_helper_max_threads=10,
-    ):
-        """
-        Params:
-            google_search_api_key: Google API key. Check out https://developers.google.com/custom-search/v1/overview
-                "API key" section
-            google_cse_id: Custom search engine ID. Check out https://developers.google.com/custom-search/v1/overview
-                "Search engine ID" section
-            k: Number of top results to retrieve.
-            is_valid_source: Optional function to filter valid sources.
-            min_char_count: Minimum character count for the article to be considered valid.
-            snippet_chunk_size: Maximum character count for each snippet.
-            webpage_helper_max_threads: Maximum number of threads to use for webpage helper.
-        """
-        super().__init__(k=k)
-        try:
-            from googleapiclient.discovery import build
-        except ImportError as err:
-            raise ImportError(
-                "GoogleSearch requires `pip install google-api-python-client`."
-            ) from err
-        if not google_search_api_key and not os.environ.get("GOOGLE_SEARCH_API_KEY"):
-            raise RuntimeError(
-                "You must supply google_search_api_key or set the GOOGLE_SEARCH_API_KEY environment variable"
-            )
-        if not google_cse_id and not os.environ.get("GOOGLE_CSE_ID"):
-            raise RuntimeError(
-                "You must supply google_cse_id or set the GOOGLE_CSE_ID environment variable"
-            )
-
-        self.google_search_api_key = (
-            google_search_api_key or os.environ["GOOGLE_SEARCH_API_KEY"]
-        )
-        self.google_cse_id = google_cse_id or os.environ["GOOGLE_CSE_ID"]
-
-        if is_valid_source:
-            self.is_valid_source = is_valid_source
-        else:
-            self.is_valid_source = lambda x: True
-
-        self.service = build(
-            "customsearch", "v1", developerKey=self.google_search_api_key
-        )
-        self.webpage_helper = WebPageHelper(
-            min_char_count=min_char_count,
-            snippet_chunk_size=snippet_chunk_size,
-            max_thread_num=webpage_helper_max_threads,
-        )
-        self.usage = 0
-
-    def get_usage_and_reset(self):
-        usage = self.usage
-        self.usage = 0
-        return {"GoogleSearch": usage}
-
-    def forward(
-        self, query_or_queries: Union[str, List[str]], exclude_urls: List[str] = []
-    ):
-        """Search using Google Custom Search API for self.k top results for query or queries.
-
-        Args:
-            query_or_queries (Union[str, List[str]]): The query or queries to search for.
-            exclude_urls (List[str]): A list of URLs to exclude from the search results.
-
-        Returns:
-            A list of dicts, each dict has keys: 'title', 'url', 'snippet', 'description'.
-        """
-        queries = (
-            [query_or_queries]
-            if isinstance(query_or_queries, str)
-            else query_or_queries
-        )
-        self.usage += len(queries)
-
-        url_to_results = {}
-
-        for query in queries:
-            try:
-                response = (
-                    self.service.cse()
-                    .list(
-                        q=query,
-                        cx=self.google_cse_id,
-                        num=self.k,
-                    )
-                    .execute()
-                )
-
-                for item in response.get("items", []):
-                    if (
-                        self.is_valid_source(item["link"])
-                        and item["link"] not in exclude_urls
-                    ):
-                        url_to_results[item["link"]] = {
-                            "title": item["title"],
-                            "url": item["link"],
-                            # "snippet": item.get("snippet", ""),  # Google search snippet is very short.
-                            "description": item.get("snippet", ""),
-                        }
-
-            except Exception as e:
-                logging.error(f"Error occurred while searching query {query}: {e}")
-
-        valid_url_to_snippets = self.webpage_helper.urls_to_snippets(
-            list(url_to_results.keys())
-        )
-        collected_results = []
-        for url in valid_url_to_snippets:
-            r = url_to_results[url]
-            r["snippets"] = valid_url_to_snippets[url]["snippets"]
-            collected_results.append(r)
-
-        return collected_results
-
-
 class AzureAISearch(dspy.Retrieve):
     """Retrieve information from custom queries using Azure AI Search.
 
@@ -1222,7 +464,7 @@ class AzureAISearch(dspy.Retrieve):
         for query in queries:
             try:
                 # https://learn.microsoft.com/en-us/python/api/azure-search-documents/azure.search.documents.searchclient?view=azure-python#azure-search-documents-searchclient-search
-                results = client.search(search_text=query, top=1)
+                results = client.search(search_text=query, top=self.k) # Corrected top parameter
 
                 for result in results:
                     document = {

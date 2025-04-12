@@ -28,16 +28,7 @@ from knowledge_storm import (
     STORMWikiLMConfigs,
 )
 from knowledge_storm.lm import OpenAIModel, AzureOpenAIModel
-from knowledge_storm.rm import (
-    YouRM,
-    BingSearch,
-    BraveRM,
-    SerperRM,
-    DuckDuckGoSearchRM,
-    TavilySearchRM,
-    SearXNG,
-    AzureAISearch,
-)
+from knowledge_storm.rm import GPT4oMiniSearchRM, AzureAISearch
 from knowledge_storm.utils import load_api_key
 
 
@@ -97,47 +88,21 @@ def main(args):
     # STORM is a knowledge curation system which consumes information from the retrieval module.
     # Currently, the information source is the Internet and we use search engine API as the retrieval module.
 
-    match args.retriever:
-        case "bing":
-            rm = BingSearch(
-                bing_search_api=os.getenv("BING_SEARCH_API_KEY"),
-                k=engine_args.search_top_k,
-            )
-        case "you":
-            rm = YouRM(ydc_api_key=os.getenv("YDC_API_KEY"), k=engine_args.search_top_k)
-        case "brave":
-            rm = BraveRM(
-                brave_search_api_key=os.getenv("BRAVE_API_KEY"),
-                k=engine_args.search_top_k,
-            )
-        case "duckduckgo":
-            rm = DuckDuckGoSearchRM(
-                k=engine_args.search_top_k, safe_search="On", region="us-en"
-            )
-        case "serper":
-            rm = SerperRM(
-                serper_search_api_key=os.getenv("SERPER_API_KEY"),
-                query_params={"autocorrect": True, "num": 10, "page": 1},
-            )
-        case "tavily":
-            rm = TavilySearchRM(
-                tavily_search_api_key=os.getenv("TAVILY_API_KEY"),
-                k=engine_args.search_top_k,
-                include_raw_content=True,
-            )
-        case "searxng":
-            rm = SearXNG(
-                searxng_api_key=os.getenv("SEARXNG_API_KEY"), k=engine_args.search_top_k
-            )
-        case "azure_ai_search":
-            rm = AzureAISearch(
-                azure_ai_search_api_key=os.getenv("AZURE_AI_SEARCH_API_KEY"),
-                k=engine_args.search_top_k,
-            )
-        case _:
-            raise ValueError(
-                f'Invalid retriever: {args.retriever}. Choose either "bing", "you", "brave", "duckduckgo", "serper", "tavily", "searxng", or "azure_ai_search"'
-            )
+    # Select the retrieval module based on the argument
+    if args.retriever == "openai":
+        # Use the new GPT4oMiniSearchRM for online search
+        rm = GPT4oMiniSearchRM(openai_api_key=os.getenv("OPENAI_API_KEY"), k=engine_args.search_top_k)
+    elif args.retriever == "azure_ai_search":
+        # Keep AzureAISearch as specified in the plan
+        rm = AzureAISearch(
+            azure_ai_search_api_key=os.getenv("AZURE_AI_SEARCH_API_KEY"),
+            k=engine_args.search_top_k,
+        )
+    # Add cases here if other RM types like VectorRM need to be selectable
+    else:
+        raise ValueError(
+            f'Invalid or unsupported retriever specified: {args.retriever}. Choose either "openai" or "azure_ai_search".'
+        )
 
     runner = STORMWikiRunner(engine_args, lm_configs, rm)
 
@@ -173,17 +138,9 @@ if __name__ == "__main__":
     parser.add_argument(
         "--retriever",
         type=str,
-        choices=[
-            "bing",
-            "you",
-            "brave",
-            "serper",
-            "duckduckgo",
-            "tavily",
-            "searxng",
-            "azure_ai_search",
-        ],
-        help="The search engine API to use for retrieving information.",
+        choices=["openai", "azure_ai_search"], # Updated choices
+        default="openai", # Set default
+        help="The retrieval module to use ('openai' for GPT-4o-Mini-Search, 'azure_ai_search' for Azure AI Search).",
     )
     # stage of the pipeline
     parser.add_argument(

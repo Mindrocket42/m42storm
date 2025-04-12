@@ -1,11 +1,11 @@
 """
-Co-STORM pipeline powered by GPT-4o/4o-mini and Bing search engine.
+Co-STORM pipeline powered by GPT-4o/4o-mini with built-in search capabilities (experimental).
 You need to set up the following environment variables to run this script:
     - OPENAI_API_KEY: OpenAI API key
     - OPENAI_API_TYPE: OpenAI API type (e.g., 'openai' or 'azure')
     - AZURE_API_BASE: Azure API base URL if using Azure API
     - AZURE_API_VERSION: Azure API version if using Azure API
-    - BING_SEARCH_API_KEY: Biang search API key; BING_SEARCH_API_KEY: Bing Search API key, SERPER_API_KEY: Serper API key, BRAVE_API_KEY: Brave API key, or TAVILY_API_KEY: Tavily API key
+    # Note: External search engine API keys are no longer required by this script's configuration.
 
 Output will be structured as below
 args.output_dir/
@@ -26,7 +26,9 @@ from knowledge_storm.collaborative_storm.modules.callback import (
 )
 from knowledge_storm.lm import OpenAIModel, AzureOpenAIModel
 from knowledge_storm.logging_wrapper import LoggingWrapper
-from knowledge_storm.rm import GPT4oMiniSearchRM
+# Removed external RM imports as the intent is to use the LLM's search.
+# Note: The underlying knowledge_storm library may still expect an RM object.
+# from knowledge_storm.rm import (...)
 from knowledge_storm.utils import load_api_key
 
 
@@ -56,8 +58,9 @@ def main(args):
     )
     # If you are using Azure service, make sure the model name matches your own deployed model name.
     # The default name here is only used for demonstration and may not match your case.
-    gpt_4o_mini_model_name = "gpt-4o-mini"
-    gpt_4o_model_name = "gpt-4o"
+    # Use a model with search capabilities for tasks requiring external information
+    gpt_4o_mini_search_model_name = "gpt-4o-mini-search-preview" # Or another suitable search-enabled model
+    gpt_4o_model_name = "gpt-4o" # Keep standard model for other tasks or use search model if preferred
     if os.getenv("OPENAI_API_TYPE") == "azure":
         openai_kwargs["api_base"] = os.getenv("AZURE_API_BASE")
         openai_kwargs["api_version"] = os.getenv("AZURE_API_VERSION")
@@ -67,8 +70,9 @@ def main(args):
     # which is used to split queries, synthesize answers in the conversation. We recommend using stronger models
     # for outline_gen_lm which is responsible for organizing the collected information, and article_gen_lm
     # which is responsible for generating sections with citations.
+    # Use the search-enabled model for question answering
     question_answering_lm = ModelClass(
-        model=gpt_4o_model_name, max_tokens=1000, **openai_kwargs
+        model=gpt_4o_mini_search_model_name, max_tokens=1000, **openai_kwargs
     )
     discourse_manage_lm = ModelClass(
         model=gpt_4o_model_name, max_tokens=500, **openai_kwargs
@@ -79,8 +83,9 @@ def main(args):
     warmstart_outline_gen_lm = ModelClass(
         model=gpt_4o_model_name, max_tokens=500, **openai_kwargs
     )
+    # Consider using the search-enabled model for question asking as well
     question_asking_lm = ModelClass(
-        model=gpt_4o_model_name, max_tokens=300, **openai_kwargs
+        model=gpt_4o_mini_search_model_name, max_tokens=300, **openai_kwargs
     )
     knowledge_base_lm = ModelClass(
         model=gpt_4o_model_name, max_tokens=1000, **openai_kwargs
@@ -114,22 +119,17 @@ def main(args):
         LocalConsolePrintCallBackHandler() if args.enable_log_print else None
     )
 
-    # Co-STORM is a knowledge curation system which consumes information from the retrieval module.
-    # Currently, the information source is the Internet and we use search engine API as the retrieval module.
-    # All previous online search RMs are replaced by GPT4oMiniSearchRM
-    if args.retriever == "openai":
-         rm = GPT4oMiniSearchRM(openai_api_key=os.getenv("OPENAI_API_KEY"), k=runner_argument.retrieve_top_k)
-    # Add cases here if other RM types like VectorRM or AzureAISearch need to be selectable via args.retriever
-    else:
-         raise ValueError(
-             f'Invalid or unsupported retriever specified: {args.retriever}. Currently configured for "openai".'
-         )
+    # External RM instantiation removed. Setting rm to None.
+    # WARNING: The CoStormRunner and its agents in the knowledge_storm library
+    # currently expect a functional RM object. Running without one will likely
+    # cause errors during agent execution.
+    rm = None
 
     costorm_runner = CoStormRunner(
         lm_config=lm_config,
         runner_argument=runner_argument,
         logging_wrapper=logging_wrapper,
-        rm=rm,
+        # rm=rm, # Passing rm=None; CoStormRunner init might handle None, but agents likely won't.
         callback_handler=callback_handler,
     )
 
@@ -183,13 +183,13 @@ if __name__ == "__main__":
         default="./results/co-storm",
         help="Directory to store the outputs.",
     )
-    parser.add_argument(
-        "--retriever",
-        type=str,
-        choices=["openai"], # Updated choices
-        default="openai",   # Set default
-        help="The online search retrieval module to use (currently only 'openai' based on GPT-4o-Mini-Search).",
-    )
+    # Removed --retriever argument as external RMs are not configured in this script.
+    # parser.add_argument(
+    #     "--retriever",
+    #     type=str,
+    #     choices=["bing", "you", "brave", "serper", "duckduckgo", "tavily", "searxng"],
+    #     help="The search engine API to use for retrieving information.",
+    # )
     # hyperparameters for co-storm
     parser.add_argument(
         "--retrieve_top_k",

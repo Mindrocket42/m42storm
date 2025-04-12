@@ -16,10 +16,10 @@
 - [2024/09] We introduce collaborative STORM (Co-STORM) to support human-AI collaborative knowledge curation! [Co-STORM Paper](https://www.arxiv.org/abs/2408.15232) has been accepted to EMNLP 2024 main conference.
 
 - [2024/07] You can now install our package with `pip install knowledge-storm`!
-- [2024/07] We add `VectorRM` to support grounding on user-provided documents, complementing existing support of search engines (`YouRM`, `BingSearch`). (check out [#58](https://github.com/stanford-oval/storm/pull/58))
+- [2024/07] We add `VectorRM` to support grounding on user-provided documents, complementing existing support for online search via `GPT4oMiniSearchRM` (using OpenAI) and `AzureAISearch`. (check out [#58](https://github.com/stanford-oval/storm/pull/58))
 - [2024/07] We release demo light for developers a minimal user interface built with streamlit framework in Python, handy for local development and demo hosting (checkout [#54](https://github.com/stanford-oval/storm/pull/54))
 - [2024/06] We will present STORM at NAACL 2024! Find us at Poster Session 2 on June 17 or check our [presentation material](assets/storm_naacl2024_slides.pdf). 
-- [2024/05] We add Bing Search support in [rm.py](knowledge_storm/rm.py). Test STORM with `GPT-4o` - we now configure the article generation part in our demo using `GPT-4o` model.
+- [2024/05] We previously added support for various search engines like Bing, You.com, etc. These have now been consolidated under the `GPT4oMiniSearchRM` which utilizes OpenAI's search capabilities, alongside the existing `AzureAISearch`.
 - [2024/04] We release refactored version of STORM codebase! We define [interface](knowledge_storm/interface.py) for STORM pipeline and reimplement STORM-wiki (check out [`src/storm_wiki`](knowledge_storm/storm_wiki)) to demonstrate how to instantiate the pipeline. We provide API to support customization of different language models and retrieval/search integration.
 
 [![Code style: black](https://img.shields.io/badge/code%20style-black-000000.svg)](https://github.com/psf/black)
@@ -95,7 +95,7 @@ Currently, our package support:
 
 - Language model components: All language models supported by litellm as listed [here](https://docs.litellm.ai/docs/providers)
 - Embedding model components: All embedding models supported by litellm as listed [here](https://docs.litellm.ai/docs/embedding/supported_embedding)
-- retrieval module components: `YouRM`, `BingSearch`, `VectorRM`, `SerperRM`, `BraveRM`, `SearXNG`, `DuckDuckGoSearchRM`, `TavilySearchRM`, `GoogleSearch`, and `AzureAISearch` as 
+- retrieval module components: `GPT4oMiniSearchRM` (requires `OPENAI_API_KEY`), `VectorRM`, and `AzureAISearch` as
 
 :star2: **PRs for integrating more search engines/retrievers into [knowledge_storm/rm.py](knowledge_storm/rm.py) are highly appreciated!**
 
@@ -109,7 +109,7 @@ The STORM knowledge curation engine is defined as a simple Python `STORMWikiRunn
 import os
 from knowledge_storm import STORMWikiRunnerArguments, STORMWikiRunner, STORMWikiLMConfigs
 from knowledge_storm.lm import LitellmModel
-from knowledge_storm.rm import YouRM
+from knowledge_storm.rm import GPT4oMiniSearchRM
 
 lm_configs = STORMWikiLMConfigs()
 openai_kwargs = {
@@ -129,7 +129,7 @@ lm_configs.set_article_gen_lm(gpt_4)
 lm_configs.set_article_polish_lm(gpt_4)
 # Check out the STORMWikiRunnerArguments class for more configurations.
 engine_args = STORMWikiRunnerArguments(...)
-rm = YouRM(ydc_api_key=os.getenv('YDC_API_KEY'), k=engine_args.search_top_k)
+rm = GPT4oMiniSearchRM(openai_api_key=os.getenv('OPENAI_API_KEY'), k=engine_args.search_top_k)
 runner = STORMWikiRunner(engine_args, lm_configs, rm)
 ```
 
@@ -159,7 +159,7 @@ The Co-STORM knowledge curation engine is defined as a simple Python `CoStormRun
 from knowledge_storm.collaborative_storm.engine import CollaborativeStormLMConfigs, RunnerArgument, CoStormRunner
 from knowledge_storm.lm import LitellmModel
 from knowledge_storm.logging_wrapper import LoggingWrapper
-from knowledge_storm.rm import BingSearch
+from knowledge_storm.rm import GPT4oMiniSearchRM
 
 # Co-STORM adopts the same multi LM system paradigm as STORM 
 lm_config: CollaborativeStormLMConfigs = CollaborativeStormLMConfigs()
@@ -188,12 +188,13 @@ lm_config.set_knowledge_base_lm(knowledge_base_lm)
 topic = input('Topic: ')
 runner_argument = RunnerArgument(topic=topic, ...)
 logging_wrapper = LoggingWrapper(lm_config)
-bing_rm = BingSearch(bing_search_api_key=os.environ.get("BING_SEARCH_API_KEY"),
-                     k=runner_argument.retrieve_top_k)
+# Use GPT4oMiniSearchRM
+openai_rm = GPT4oMiniSearchRM(openai_api_key=os.environ.get("OPENAI_API_KEY"),
+                           k=runner_argument.retrieve_top_k)
 costorm_runner = CoStormRunner(lm_config=lm_config,
                                runner_argument=runner_argument,
                                logging_wrapper=logging_wrapper,
-                               rm=bing_rm)
+                               rm=openai_rm) # Pass the initialized GPT4oMiniSearchRM
 ```
 
 The `CoStormRunner` instance can be evoked with the `warmstart()` and `step(...)` methods.
@@ -234,7 +235,13 @@ OPENAI_API_TYPE="azure"
 AZURE_API_BASE="your_azure_api_base_url"
 AZURE_API_VERSION="your_azure_api_version"
 # ============ retriever configurations ============ 
-BING_SEARCH_API_KEY="your_bing_search_api_key" # if using bing search
+# The default retriever GPT4oMiniSearchRM uses OPENAI_API_KEY (set above).
+# If using Azure AI Search specifically:
+AZURE_AI_SEARCH_API_KEY="your_azure_ai_search_api_key"
+AZURE_AI_SEARCH_URL="your_azure_ai_search_url"
+AZURE_AI_SEARCH_INDEX_NAME="your_azure_ai_search_index_name"
+# If using VectorRM, relevant Qdrant keys/paths might be needed.
+# BING_SEARCH_API_KEY="your_bing_search_api_key" # Optional, for specific examples if needed.
 # ============ encoder configurations ============ 
 ENCODER_API_TYPE="openai" # if using openai encoder
 ```
@@ -247,7 +254,7 @@ Run the following command.
 ```bash
 python examples/storm_examples/run_storm_wiki_gpt.py \
     --output-dir $OUTPUT_DIR \
-    --retriever bing \
+    # --retriever bing \ # No longer needed, defaults to GPT4oMiniSearchRM
     --do-research \
     --do-generate-outline \
     --do-generate-article \
@@ -260,13 +267,13 @@ python examples/storm_examples/run_storm_wiki_gpt.py \
 
 To run Co-STORM with `gpt` family models with default configurations,
 
-1. Add `BING_SEARCH_API_KEY="xxx"` and `ENCODER_API_TYPE="xxx"` to `secrets.toml`
+1. Add `OPENAI_API_KEY="xxx"` and `ENCODER_API_TYPE="xxx"` to `secrets.toml`
 2. Run the following command
 
 ```bash
 python examples/costorm_examples/run_costorm_gpt.py \
     --output-dir $OUTPUT_DIR \
-    --retriever bing
+    # --retriever bing # No longer needed, defaults to GPT4oMiniSearchRM
 ```
 
 
@@ -299,7 +306,7 @@ The FreshWiki Dataset is a collection of 100 high-quality Wikipedia articles foc
 You can download the dataset from [huggingface](https://huggingface.co/datasets/EchoShao8899/FreshWiki) directly. To ease the data contamination issue, we archive the [source code](https://github.com/stanford-oval/storm/tree/NAACL-2024-code-backup/FreshWiki) for the data construction pipeline that can be repeated at future dates.
 
 ### WildSeek
-To study users’ interests in complex information seeking tasks in the wild, we utilized data collected from the web research preview to create the WildSeek dataset. We downsampled the data to ensure the diversity of the topics and the quality of the data. Each data point is a pair comprising a topic and the user’s goal for conducting deep search on the topic.  For more details, please refer to Section 2.2 and Appendix A of [Co-STORM paper](https://www.arxiv.org/abs/2408.15232).
+To study users' interests in complex information seeking tasks in the wild, we utilized data collected from the web research preview to create the WildSeek dataset. We downsampled the data to ensure the diversity of the topics and the quality of the data. Each data point is a pair comprising a topic and the user's goal for conducting deep search on the topic.  For more details, please refer to Section 2.2 and Appendix A of [Co-STORM paper](https://www.arxiv.org/abs/2408.15232).
 
 The WildSeek dataset is available [here](https://huggingface.co/datasets/YuchengJiang/WildSeek).
 

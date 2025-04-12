@@ -18,7 +18,7 @@ from ..encoder import Encoder
 from ..interface import LMConfigs, Agent
 from ..logging_wrapper import LoggingWrapper
 from ..lm import LitellmModel
-from ..rm import BingSearch
+from ..rm import GPT4oMiniSearchRM
 
 
 class CollaborativeStormLMConfigs(LMConfigs):
@@ -516,7 +516,7 @@ class CoStormRunner:
         self.logging_wrapper = logging_wrapper
         self.callback_handler = callback_handler
         if rm is None:
-            self.rm = BingSearch(k=runner_argument.retrieve_top_k)
+            self.rm = GPT4oMiniSearchRM(k=runner_argument.retrieve_top_k)
         else:
             self.rm = rm
         self.encoder = Encoder()

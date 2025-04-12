@@ -9,7 +9,7 @@ from knowledge_storm import (
     STORMWikiLMConfigs,
 )
 from knowledge_storm.lm import OllamaClient
-from knowledge_storm.rm import SearXNG
+from knowledge_storm.rm import GPT4oMiniSearchRM
 from knowledge_storm.utils import load_api_key
 
 
@@ -44,11 +44,9 @@ def main(args):
         max_thread_num=args.max_thread_num,
     )
 
-    rm = SearXNG(
-        searxng_api_url=args.searxng_api_url,
-        searxng_api_key=os.getenv("SEARXNG_API_KEY"),
-        k=engine_args.search_top_k,
-    )
+    # Replace SearXNG with GPT4oMiniSearchRM
+    # Note: searxng_api_url and searxng_api_key are specific to SearXNG and not used here.
+    rm = GPT4oMiniSearchRM(openai_api_key=os.getenv("OPENAI_API_KEY"), k=engine_args.search_top_k)
 
     runner = STORMWikiRunner(engine_args, lm_configs, rm)
 

@@ -25,7 +25,7 @@ from knowledge_storm import (
     STORMWikiLMConfigs,
 )
 from knowledge_storm.lm import ClaudeModel
-from knowledge_storm.rm import SerperRM
+from knowledge_storm.rm import GPT4oMiniSearchRM
 from knowledge_storm.utils import load_api_key
 
 
@@ -79,8 +79,10 @@ def main(args):
     # page is how many pages will be searched.
     # h1 is where the google search will orginate from.
     topic = input("topic: ")
-    data = {"autocorrect": True, "num": 10, "page": 1}
-    rm = SerperRM(serper_search_api_key=os.getenv("SERPER_API_KEY"), query_params=data)
+    # Replace SerperRM with GPT4oMiniSearchRM
+    # Note: query_params 'data' is specific to SerperRM and not used here.
+    # Using engine_args.search_top_k for the 'k' parameter.
+    rm = GPT4oMiniSearchRM(openai_api_key=os.getenv("OPENAI_API_KEY"), k=engine_args.search_top_k)
 
     runner = STORMWikiRunner(engine_args, lm_configs, rm)
 
